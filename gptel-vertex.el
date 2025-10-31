@@ -288,10 +288,10 @@ Refreshes the token if it's expired or missing."
           (header (lambda ()
                     (let ((token (gptel-vertex--ensure-auth gptel-backend)))
                       `(("Authorization" . ,(format "Bearer %s" token))))))
-          (models '((gemini-2.0-flash-exp :description "Gemini 2.5 Flash")
-                    (gemini-2.0-pro-exp :description "Gemini 2.5 Pro")
-                    (claude-3-5-sonnet-v2@20241022 :description "Claude Sonnet 4.5")
-                    (claude-3-opus@20240229 :description "Claude Opus 4.1")))
+          (models '((gemini-2.5-flash :description "Gemini 2.5 Flash")
+                    (gemini-2.5-pro :description "Gemini 2.5 Pro")
+                    (claude-sonnet-4-5@20250929 :description "Claude Sonnet 4.5")
+                    (claude-opus-4-1@20250805 :description "Claude Opus 4.1")))
           (stream t)
           (protocol "https")
           curl-args
@@ -347,12 +347,12 @@ REQUEST-PARAMS: Additional model parameters."
     (&key (name "VertexAI")
           project-id
           (location gptel-vertex-default-location)
-          (models '((gemini-2.0-flash-exp :description "Gemini 2.5 Flash")
-                    (gemini-2.0-pro-exp :description "Gemini 2.5 Pro")
-                    (claude-3-5-sonnet-v2@20241022 :description "Claude Sonnet 4.5")
-                    (claude-3-opus@20240229 :description "Claude Opus 4.1")))
+          (models '((gemini-2.5-flash :description "Gemini 2.5 Flash")
+                    (gemini-2.5-pro :description "Gemini 2.5 Pro")
+                    (claude-sonnet-4-5@20250929 :description "Claude Sonnet 4.5")
+                    (claude-opus-4-1@20250805 :description "Claude Opus 4.1")))
           (stream t)
-          (default-model 'claude-3-5-sonnet-v2@20241022))
+          (default-model 'claude-sonnet-4-5@20250929))
   "Setup a Vertex AI backend for gptel.
 
 This is a convenience function that creates a backend and sets it as default.
