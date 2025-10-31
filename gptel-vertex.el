@@ -1,41 +1,22 @@
 ;;; gptel-vertex.el --- Google Cloud Vertex AI support for gptel  -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2024-2025
+;; Author: Ashlin Eldridge <ashlin.eldridge@gmail.com>
+;; URL: https://github.com/ashlineldridge/gptel-vertex
+;; Version: 0.0.1
+;; Package-Requires: ((emacs "30.0"))
 
 ;; Author: Your Name
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "27.1") (gptel "0.9.0"))
-;; Keywords: convenience, tools, llm, ai
+;; Package-Requires: ((emacs "30.0") (gptel "0.9"))
+;; Keywords: ai, llm, google, gcp, vertex, claude, gemini
 ;; URL: https://github.com/yourusername/gptel-vertex
 
-;; This program is free software; you can redistribute it and/or modify
-;; it under the terms of the GNU General Public License as published by
-;; the Free Software Foundation, either version 3 of the License, or
-;; (at your option) any later version.
-
-;; This program is distributed in the hope that it will be useful,
-;; but WITHOUT ANY WARRANTY; without even the implied warranty of
-;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;; GNU General Public License for more details.
-
-;; You should have received a copy of the GNU General Public License
-;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
 ;;; Commentary:
-
+;;
 ;; This package adds support for Google Cloud Vertex AI to gptel.
-;; It supports both Gemini and Claude models via the Vertex AI API.
-;;
-;; Prerequisites:
-;; - Google Cloud SDK installed and authenticated
-;; - A GCP project with Vertex AI API enabled
-;;
-;; Basic usage:
-;;   (require 'gptel-vertex)
-;;   (gptel-vertex-setup-backend
-;;     :project-id "your-project-id")
 
 ;;; Code:
+
 (require 'gptel)
 (require 'cl-generic)
 (require 'map)
@@ -46,6 +27,11 @@
 (declare-function json-read "json")
 (declare-function gptel-context--wrap "gptel-context")
 (declare-function gptel-context--collect-media "gptel-context")
+(declare-function gptel--parse-media-links "gptel")
+(declare-function gptel--base64-encode "gptel")
+(declare-function gptel--trim-prefixes "gptel")
+(declare-function gptel--insert-file-string "gptel")
+(declare-function gptel--json-read "gptel")
 (defvar json-object-type)
 
 ;;; Customization
@@ -107,10 +93,10 @@ Refreshes the token if it's expired or missing."
   (let* ((model-name (gptel--model-name gptel-model))
          (is-claude (string-match-p "claude" model-name))
          (publisher (if is-claude "anthropic" "google")))
-    
-    ;; Update publisher in backend
+
+    ;; Update publisher in backend dynamically based on current model
     (setf (gptel-vertex-publisher backend) publisher)
-    
+
     (if is-claude
         ;; Claude request format via Vertex
         (let ((messages
@@ -137,26 +123,26 @@ Refreshes the token if it's expired or missing."
                                            (t role))
                         when (and claude-role text)
                         collect `(:role ,claude-role :content ,text))))
-          
+
           ;; Build the request body for Claude
           (let ((request-body
                  `(:anthropic_version "vertex-2023-10-16"
                    :messages ,(vconcat messages)
                    :max_tokens ,(or gptel-max-tokens 4096))))
-            
+
             ;; Add optional parameters
             (when gptel-temperature
               (plist-put request-body :temperature gptel-temperature))
-            
+
             (when gptel--system-message
               (plist-put request-body :system gptel--system-message))
-            
+
             ;; Add streaming flag if needed
-            (when (boundp 'gptel-stream)
-              (plist-put request-body :stream (if gptel-stream t :json-false)))
-            
+            (when (and (boundp 'gptel-stream) gptel-stream)
+              (plist-put request-body :stream t))
+
             request-body))
-      
+
       ;; Gemini request format
       (let ((prompts-plist
              (list :contents (vconcat prompts)
@@ -169,84 +155,98 @@ Refreshes the token if it's expired or missing."
                                     (:category "HARM_CATEGORY_HATE_SPEECH"
                                      :threshold "BLOCK_NONE")]))
             params)
-        
+
         (when gptel--system-message
           (plist-put prompts-plist :systemInstruction
                      `(:parts [(:text ,gptel--system-message)])))
-        
+
         (when gptel-temperature
           (setq params
                 (plist-put params :temperature (max gptel-temperature 1.0))))
-        
+
         (when gptel-max-tokens
           (setq params
                 (plist-put params :maxOutputTokens gptel-max-tokens)))
-        
+
         (when params
           (plist-put prompts-plist :generationConfig params))
-        
+
         prompts-plist))))
+
+;;; Stream parsing
+(cl-defmethod gptel-curl--parse-stream ((backend gptel-vertex) info)
+  "Parse a Vertex AI data stream.
+Return the text response accumulated since the last call."
+  (let* ((publisher (gptel-vertex-publisher backend))
+         (content-strs))
+    (if (equal publisher "anthropic")
+        ;; Claude stream parsing
+        (condition-case nil
+            (while (re-search-forward "^event: " nil t)
+              (when (looking-at "message_delta")
+                (forward-line 1)
+                (when (looking-at "^data: ")
+                  (forward-char 6)
+                  (when-let* ((json-response (gptel--json-read))
+                              (delta (plist-get json-response :delta))
+                              (text (plist-get delta :text)))
+                    (push text content-strs)))))
+          (error nil))
+      ;; Gemini stream parsing
+      (condition-case nil
+          (while (prog1 (search-forward "{" nil t)
+                   (backward-char 1))
+            (save-match-data
+              (when-let* ((response (gptel--json-read))
+                          (candidates (plist-get response :candidates))
+                          (candidate (and candidates (aref candidates 0)))
+                          (content (plist-get candidate :content))
+                          (parts (plist-get content :parts)))
+                (cl-loop for part across parts
+                         for text = (plist-get part :text)
+                         when text
+                         do (push text content-strs)))))
+        (error nil)))
+    (apply #'concat (nreverse content-strs))))
 
 ;;; Response parsing
 (cl-defmethod gptel--parse-response ((backend gptel-vertex) response info)
   "Parse Vertex AI RESPONSE and call INFO's callback."
   (let* ((json-object-type 'plist)
-         (json-response (condition-case nil
-                            (json-read-from-string response)
-                          (json-readtable-error nil)))
          (publisher (gptel-vertex-publisher backend)))
-    
-    (if json-response
-        (if (equal publisher "anthropic")
-            ;; Handle Claude response format
-            (if-let ((content (plist-get json-response :content)))
-                ;; Claude returns content as an array
-                (if (vectorp content)
-                    (mapconcat (lambda (item)
-                                 (plist-get item :text))
-                               content "")
-                  content)
-              ;; Error handling
-              (or (plist-get json-response :error)
-                  ""))
-          ;; Handle Gemini response format
-          (if-let ((candidates (plist-get json-response :candidates)))
-              (let ((candidate (aref candidates 0)))
-                (if-let ((content (plist-get candidate :content)))
-                    (let ((parts (plist-get content :parts)))
-                      (if (vectorp parts)
-                          (mapconcat (lambda (part)
-                                       (plist-get part :text))
-                                     parts "")
-                        ""))
-                  ""))
-            ""))
-      "")))
 
-;;; URL construction
-(cl-defmethod gptel--url ((backend gptel-vertex))
-  "Get URL for BACKEND."
-  (let* ((project-id (gptel-vertex-project-id backend))
-         (location (gptel-vertex-location backend))
-         (model-name (gptel--model-name gptel-model))
-         (is-claude (string-match-p "claude" model-name))
-         (publisher (if is-claude "anthropic" "google"))
-         (method (cond
-                  ;; Claude methods
-                  ((and is-claude gptel-stream) "streamRawPredict")
-                  (is-claude "rawPredict")
-                  ;; Gemini methods
-                  ((and gptel-stream gptel-use-curl) "streamGenerateContent")
-                  (t "generateContent"))))
-    (format "https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/%s/models/%s:%s"
-            location project-id location publisher model-name method)))
+    (if (equal publisher "anthropic")
+        ;; Handle Claude response format
+        (if-let ((content (plist-get response :content)))
+            ;; Claude returns content as an array
+            (if (vectorp content)
+                (mapconcat (lambda (item)
+                             (plist-get item :text))
+                           content "")
+              content)
+          ;; Error handling
+          (or (plist-get response :error)
+              ""))
+      ;; Handle Gemini response format
+      (if-let ((candidates (plist-get response :candidates)))
+          (let ((candidate (aref candidates 0)))
+            (if-let ((content (plist-get candidate :content)))
+                (let ((parts (plist-get content :parts)))
+                  (if (vectorp parts)
+                      (mapconcat (lambda (part)
+                                   (plist-get part :text))
+                                 parts "")
+                    ""))
+              ""))
+        ""))))
+
 
 ;;; Parse prompt list
 (cl-defmethod gptel--parse-list ((backend gptel-vertex) prompt-list)
   "Parse PROMPT-LIST for Vertex AI."
   (let* ((model-name (gptel--model-name gptel-model))
          (is-claude (string-match-p "claude" model-name)))
-    
+
     (if is-claude
         ;; For Claude, convert to simple format
         (if (consp (car prompt-list))
@@ -262,7 +262,7 @@ Refreshes the token if it's expired or missing."
                      (push `(:role "user" :content ,item) prompts)))))
               (vconcat (nreverse prompts)))
           prompt-list)
-      
+
       ;; For Gemini, convert to its expected format
       (if (consp (car prompt-list))
           (let ((prompts))
@@ -280,18 +280,69 @@ Refreshes the token if it's expired or missing."
             (vconcat (nreverse prompts)))
         prompt-list))))
 
+;;; Parse buffer method for Gemini
+(cl-defmethod gptel--parse-buffer ((backend gptel-vertex) &optional max-entries)
+  "Parse the buffer content for Vertex AI."
+  (let* ((model-name (gptel--model-name gptel-model))
+         (is-claude (string-match-p "claude" model-name)))
+
+    (if is-claude
+        ;; For Claude, use simple text extraction
+        (let ((prompts) (prev-pt (point)))
+          (if (or gptel-mode gptel-track-response)
+              (while (and (or (not max-entries) (>= max-entries 0))
+                          (goto-char (previous-single-property-change
+                                      (point) 'gptel nil (point-min)))
+                          (not (= (point) prev-pt)))
+                (pcase (get-char-property (point) 'gptel)
+                  ('response
+                   (when-let* ((content (gptel--trim-prefixes
+                                         (buffer-substring-no-properties (point) prev-pt))))
+                     (push `(:role "assistant" :content ,content) prompts)))
+                  ('nil
+                   (when-let* ((content (gptel--trim-prefixes
+                                         (buffer-substring-no-properties (point) prev-pt))))
+                     (push `(:role "user" :content ,content) prompts))))
+                (setq prev-pt (point))
+                (and max-entries (cl-decf max-entries)))
+            (let ((content (string-trim (buffer-substring-no-properties
+                                         (point-min) (point-max)))))
+              (push `(:role "user" :content ,content) prompts)))
+          (vconcat (nreverse prompts)))
+
+      ;; For Gemini, use the parts format
+      (let ((prompts) (prev-pt (point)))
+        (if (or gptel-mode gptel-track-response)
+            (while (and (or (not max-entries) (>= max-entries 0))
+                        (goto-char (previous-single-property-change
+                                    (point) 'gptel nil (point-min)))
+                        (not (= (point) prev-pt)))
+              (pcase (get-char-property (point) 'gptel)
+                ('response
+                 (when-let* ((content (gptel--trim-prefixes
+                                       (buffer-substring-no-properties (point) prev-pt))))
+                   (push (list :role "model" :parts `[(:text ,content)]) prompts)))
+                ('nil
+                 (when-let* ((content (gptel--trim-prefixes
+                                       (buffer-substring-no-properties (point) prev-pt))))
+                   (push (list :role "user" :parts `[(:text ,content)]) prompts))))
+              (setq prev-pt (point))
+              (and max-entries (cl-decf max-entries)))
+          (let ((content (string-trim (buffer-substring-no-properties
+                                       (point-min) (point-max)))))
+            (push (list :role "user" :parts `[(:text ,content)]) prompts)))
+        (vconcat (nreverse prompts))))))
+
 ;;; Backend constructor
 (cl-defun gptel-make-vertex
     (name &key project-id
           (location gptel-vertex-default-location)
           (host (format "%s-aiplatform.googleapis.com" location))
-          (header (lambda ()
-                    (let ((token (gptel-vertex--ensure-auth gptel-backend)))
-                      `(("Authorization" . ,(format "Bearer %s" token))))))
+          header
           (models '((gemini-2.5-flash :description "Gemini 2.5 Flash")
                     (gemini-2.5-pro :description "Gemini 2.5 Pro")
-                    (claude-sonnet-4-5@20250929 :description "Claude Sonnet 4.5")
-                    (claude-opus-4-1@20250805 :description "Claude Opus 4.1")))
+                    (claude-4.5-sonnet@20250929 :description "Claude 4.5 Sonnet")
+                    (claude-4.1-opus@20250805 :description "Claude 4.1 Opus")))
           (stream t)
           (protocol "https")
           curl-args
@@ -315,32 +366,56 @@ CURL-ARGS: Additional arguments for curl requests.
 REQUEST-PARAMS: Additional model parameters."
   (unless project-id
     (error "PROJECT-ID is required for Vertex AI backend"))
-  
+
   ;; Determine initial publisher based on first model
-  (let* ((first-model (if (listp models) 
+  (let* ((first-model (if (listp models)
                           (caar models)
                         models))
          (model-name (if (symbolp first-model)
                          (symbol-name first-model)
                        first-model))
-         (publisher (if (string-match-p "claude" model-name) "anthropic" "google")))
-    
-    (let ((backend (gptel--make-vertex
-                    :curl-args curl-args
-                    :name name
-                    :host host
-                    :header header
-                    :models (gptel--process-models models)
-                    :protocol protocol
-                    :stream stream
-                    :request-params request-params
-                    :project-id project-id
-                    :location location
-                    :publisher publisher
-                    :url #'gptel--url)))
-      (prog1 backend
-        (setf (alist-get name gptel--known-backends nil nil #'equal)
-              backend)))))
+         (publisher (if (string-match-p "claude" model-name) "anthropic" "google"))
+         ;; Create a unique variable to capture the backend being created
+         (backend-var nil))
+
+    ;; Create the header function that will capture the backend
+    (unless header
+      (setq header
+            (lambda ()
+              (let* ((backend (or backend-var gptel-backend))
+                     (token (gptel-vertex--ensure-auth backend)))
+                `(("Authorization" . ,(format "Bearer %s" token)))))))
+
+    (setq backend-var
+          (gptel--make-vertex
+           :curl-args curl-args
+           :name name
+           :host host
+           :header header
+           :models (gptel--process-models models)
+           :protocol protocol
+           :stream stream
+           :request-params request-params
+           :project-id project-id
+           :location location
+           :publisher publisher
+           :url (lambda ()
+                  (let* ((model-name (gptel--model-name gptel-model))
+                         (is-claude (string-match-p "claude" model-name))
+                         (publisher (if is-claude "anthropic" "google"))
+                         (method (cond
+                                  ;; Claude methods
+                                  ((and is-claude gptel-stream) "streamRawPredict")
+                                  (is-claude "rawPredict")
+                                  ;; Gemini methods
+                                  ((and gptel-stream gptel-use-curl) "streamGenerateContent")
+                                  (t "generateContent"))))
+                    (format "https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/%s/models/%s:%s"
+                            location project-id location publisher model-name method)))))
+
+    (prog1 backend-var
+      (setf (alist-get name gptel--known-backends nil nil #'equal)
+            backend-var))))
 
 ;;; Convenience setup function
 (cl-defun gptel-vertex-setup-backend
@@ -349,10 +424,10 @@ REQUEST-PARAMS: Additional model parameters."
           (location gptel-vertex-default-location)
           (models '((gemini-2.5-flash :description "Gemini 2.5 Flash")
                     (gemini-2.5-pro :description "Gemini 2.5 Pro")
-                    (claude-sonnet-4-5@20250929 :description "Claude Sonnet 4.5")
-                    (claude-opus-4-1@20250805 :description "Claude Opus 4.1")))
+                    (claude-4.5-sonnet@20250929 :description "Claude 4.5 Sonnet")
+                    (claude-4.1-opus@20250805 :description "Claude 4.1 Opus")))
           (stream t)
-          (default-model 'claude-sonnet-4-5@20250929))
+          (default-model 'claude-4.5-sonnet@20250929))
   "Setup a Vertex AI backend for gptel.
 
 This is a convenience function that creates a backend and sets it as default.
@@ -370,19 +445,20 @@ STREAM: Enable streaming (default: t).
 DEFAULT-MODEL: Model to use by default."
   (unless project-id
     (error "PROJECT-ID is required"))
-  
+
   (let ((backend (gptel-make-vertex
-                  name
-                  :project-id project-id
-                  :location location
-                  :models models
-                  :stream stream)))
+                     name
+                   :project-id project-id
+                   :location location
+                   :models models
+                   :stream stream)))
     ;; Set as default backend
     (setq-default gptel-backend backend)
     (setq-default gptel-model default-model)
-    
+
     ;; Return the backend
     backend))
 
 (provide 'gptel-vertex)
+
 ;;; gptel-vertex.el ends here

@@ -1,0 +1,6 @@
+* gptel-vertex
+This package adds [[https://cloud.google.com/vertex-ai][Google Vertex]] support to [[https://github.com/karthink/gptel][gptel]]. The following models are supported:
+- Gemini 2.5 Flash
+- Gemini 2.5 Pro
+- Claude 4.5 Sonnet
+- Claude 4.1 Opus
