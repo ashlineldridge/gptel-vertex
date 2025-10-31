@@ -1,174 +1,215 @@
 # gptel-vertex
 
-Google Cloud Vertex AI backend for [gptel](https://github.com/karthink/gptel).
+Google Cloud Vertex AI backend for [gptel](https://github.com/karthink/gptel), supporting both Gemini and Claude models through Vertex AI.
 
 ## Features
 
-- Support for all Gemini models (1.5 Pro, 1.5 Flash, 2.0 Flash Experimental)
-- Support for Claude models via Vertex AI
-- Automatic token refresh using gcloud CLI
-- Streaming support
-- Tool/function calling support
-- Multi-modal support (images, documents) for Gemini models
+- **Dual Model Support**: Access both Google's Gemini and Anthropic's Claude models through a single interface
+- **Automatic Authentication**: Uses `gcloud` CLI authentication with automatic token refresh
+- **Global and Regional Endpoints**: Support for both endpoint types
+  - **Global endpoints** (recommended): Maximum availability with dynamic routing
+  - **Regional endpoints**: Data residency compliance with 10% pricing premium for Claude
+- **Streaming Support**: Real-time streaming responses for both model families
+- **Latest Models**: Includes all current Claude models with version identifiers
+  - Claude Sonnet 4.5, 4, 3.7
+  - Claude Opus 4.1, 4, 3
+  - Claude Haiku 4.5, 3.5, 3
 
 ## Prerequisites
 
-1. Install Google Cloud SDK:
-```bash
-# macOS
-brew install google-cloud-sdk
-
-# Or download from
-# https://cloud.google.com/sdk/docs/install
-```
-
-2. Authenticate with Google Cloud:
-```bash
-gcloud auth login
-gcloud auth application-default login
-```
-
-3. Set your GCP project:
-```bash
-gcloud config set project YOUR_PROJECT_ID
-```
-
-4. Enable Vertex AI API:
-```bash
-gcloud services enable aiplatform.googleapis.com
-```
+1. Google Cloud SDK installed and configured
+2. Authenticated with `gcloud auth login`
+3. A GCP project with Vertex AI API enabled
+4. Access to Claude models in your region (check [Model Garden](https://cloud.google.com/model-garden))
 
 ## Installation
 
+### Using straight.el
+
+```elisp
+(straight-use-package
+  '(gptel-vertex :type git
+                 :host github
+                 :repo "yourusername/gptel-vertex"))
+```
+
 ### Manual Installation
 
-1. Clone this repository:
 ```bash
-git clone https://github.com/yourusername/gptel-vertex.git ~/dev/home/gptel-vertex
+git clone https://github.com/yourusername/gptel-vertex
 ```
 
-2. Add to your Emacs configuration:
+Add to your Emacs configuration:
+
 ```elisp
-(use-package gptel-vertex
-  :after gptel
-  :load-path "~/dev/home/gptel-vertex"
-  :config
-  ;; Configure with your project ID
-  (gptel-vertex-setup-backend
-    :project-id "your-project-id"
-    :location "us-central1"
-    :models 'gemini  ; or 'claude or 'both
-    :stream t))
+(add-to-list 'load-path "/path/to/gptel-vertex")
+(require 'gptel-vertex)
 ```
 
-## Configuration Examples
+## Configuration
 
-### Basic Gemini Setup
+### Quick Start
+
 ```elisp
+;; Basic setup with all models and global endpoint
 (gptel-vertex-setup-backend
-  :project-id "my-gcp-project"
-  :location "us-central1"
-  :models 'gemini
-  :stream t)
+  :project-id "your-project-id")
 ```
 
-### Claude Models Setup
+### Claude Models Only (Recommended for Best Performance)
+
 ```elisp
+;; Claude models with global endpoint for maximum availability
 (gptel-vertex-setup-backend
-  :name "Vertex-Claude"
-  :project-id "my-gcp-project"
-  :location "us-east5"  ; Required for Claude
-  :models 'claude
-  :stream t)
+  :project-id "your-project-id"
+  :location "global"  ; Recommended for Claude
+  :models 'claude)
 ```
 
-### Both Gemini and Claude
+### Regional Configuration (Data Residency)
+
 ```elisp
+;; Use specific region for data residency requirements
+;; Note: 10% pricing premium for Claude models
 (gptel-vertex-setup-backend
-  :name "Vertex-All"
-  :project-id "my-gcp-project"
-  :location "us-central1"
-  :models 'both
-  :stream t)
+  :project-id "your-project-id"
+  :location "us-east1"  ; or "europe-west1", etc.
+  :models 'claude)
 ```
 
 ### Advanced Configuration
+
 ```elisp
-(gptel-make-vertex "Vertex-Custom"
-  :project-id "my-gcp-project"
-  :location "us-central1"
-  :models '((gemini-1.5-pro-002
-             :description "Best for complex reasoning"
-             :capabilities (tool-use json media))
-            (gemini-1.5-flash-002
-             :description "Fast and efficient"))
-  :stream t
-  :request-params '(:temperature 0.7
-                    :maxOutputTokens 2000))
+(setq my-vertex-backend
+  (gptel-make-vertex "MyVertex"
+    :project-id "my-project-id"
+    :location "global"
+    :models '((claude-sonnet-4-5@20250929 :description "Most capable")
+              (claude-haiku-4-5@20251001 :description "Fast")
+              gemini-2.5-pro)
+    :stream t
+    :curl-args '("--max-time" "100")))
+
+;; Set as default
+(setq-default gptel-backend my-vertex-backend)
+(setq-default gptel-model 'claude-sonnet-4-5@20250929)
 ```
 
 ## Available Models
 
-### Gemini Models
-- `gemini-1.5-pro-002` - Most capable Gemini 1.5 model
-- `gemini-1.5-flash-002` - Fast and efficient
-- `gemini-2.0-flash-exp` - Experimental Gemini 2.0
+### Claude Models (via Anthropic publisher)
 
-### Claude Models (via Vertex AI)
-- `claude-3-5-sonnet-v2@20241022` - Latest Claude 3.5 Sonnet
-- `claude-3-5-sonnet@20240620` - Claude 3.5 Sonnet
-- `claude-3-opus@20240229` - Most capable Claude 3
-- `claude-3-sonnet@20240229` - Balanced Claude 3
-- `claude-3-haiku@20240307` - Fast Claude 3
+| Model ID | Description | Notes |
+|----------|-------------|-------|
+| `claude-sonnet-4-5@20250929` | Claude Sonnet 4.5 | Most capable balanced model |
+| `claude-sonnet-4@20250514` | Claude Sonnet 4 | Previous generation |
+| `claude-opus-4-1@20250805` | Claude Opus 4.1 | Most capable model |
+| `claude-opus-4@20250514` | Claude Opus 4 | Previous generation |
+| `claude-haiku-4-5@20251001` | Claude Haiku 4.5 | Fast and efficient |
+| `claude-3-5-haiku@20241022` | Claude Haiku 3.5 | Previous generation |
+| `claude-3-haiku@20240307` | Claude Haiku 3 | Base Haiku model |
+| `claude-3-7-sonnet@20250219` | Claude Sonnet 3.7 | ⚠️ Deprecated Oct 28, 2025 |
+| `claude-3-opus@20240229` | Claude Opus 3 | ⚠️ Deprecated Jun 30, 2025 |
 
-## Supported Regions
+### Gemini Models (via Google publisher)
 
-Not all models are available in all regions:
-
-- **Gemini**: Most regions (us-central1, europe-west4, asia-northeast1, etc.)
-- **Claude**: Limited regions (us-east5 primarily)
-
-See `gptel-vertex-regions` for a complete list.
+- `gemini-2.5-flash` - Fast, efficient model
+- `gemini-2.5-pro` - More capable model
 
 ## Usage
 
 After configuration, use gptel as normal:
 
 ```elisp
-;; Start a chat
+;; Open a chat buffer
 M-x gptel
 
-;; Send a query programmatically
-(gptel-request
-  "Explain quantum computing"
-  :system "You are a helpful assistant"
-  :callback (lambda (response info)
-              (when response
-                (insert response))))
+;; Send a query from any buffer
+M-x gptel-send
+
+;; Switch models
+(setq gptel-model 'claude-haiku-4-5@20251001)
+
+;; Switch between streaming and non-streaming
+(setq gptel-stream t)  ; or nil
+```
+
+## Best Practices (Following Anthropic Recommendations)
+
+### 1. Use Global Endpoints for Claude
+
+The global endpoint provides maximum availability and no pricing premium:
+
+```elisp
+(gptel-vertex-setup-backend
+  :project-id "your-project-id"
+  :location "global"  ; Recommended
+  :models 'claude)
+```
+
+### 2. Model Selection
+
+- **Claude Sonnet 4.5**: Best balance of capability and speed
+- **Claude Haiku 4.5**: Fast responses for simpler tasks
+- **Claude Opus 4.1**: Maximum capability for complex tasks
+
+### 3. API Compatibility
+
+This implementation follows Anthropic's Vertex AI integration exactly:
+- Uses `anthropic_version: "vertex-2023-10-16"` in request body
+- Proper endpoint structure: `/publishers/anthropic/models/{model}:rawPredict`
+- Streaming uses `:streamRawPredict` for Claude models
+
+### 4. Authentication
+
+Token refresh happens automatically before expiry (default 3500 seconds):
+
+```elisp
+;; Customize refresh timing if needed
+(setq gptel-vertex-token-refresh-seconds 3000)
 ```
 
 ## Troubleshooting
 
 ### Authentication Issues
+
 ```bash
-# Refresh authentication
+# Ensure you're logged in
+gcloud auth login
+
+# Check application default credentials
 gcloud auth application-default login
 
-# Verify credentials
-gcloud auth list
-
-# Check project
-gcloud config get-value project
+# Verify access token
+gcloud auth print-access-token
 ```
 
-### Token Expiry
-Tokens are automatically refreshed. The default refresh is 100 seconds before expiry (configurable via `gptel-vertex-token-refresh-seconds`).
+### Model Access
 
-### Region Issues
-If a model isn't available in your region, try:
-- us-central1 for Gemini models
-- us-east5 for Claude models
+```bash
+# List available models in your region
+gcloud ai models list --region=global --filter="claude"
+```
+
+### Region Selection
+
+- Use `"global"` for Claude models (recommended)
+- Use specific regions only when required for compliance
+- Check [model availability](https://cloud.google.com/vertex-ai/generative-ai/docs/partner-models/use-claude) by region
+
+## Implementation Notes
+
+This package implements:
+- Proper URL construction per Anthropic's documentation
+- Correct request/response format for both Claude and Gemini
+- Automatic publisher detection based on model name
+- Support for both streaming endpoints (streamRawPredict for Claude, streamGenerateContent for Gemini)
+- Token management with automatic refresh
 
 ## License
 
-GPL-3.0-or-later
+GPL-3.0
+
+## Contributing
+
+Contributions welcome! Please ensure any changes maintain compatibility with both Claude and Gemini models.

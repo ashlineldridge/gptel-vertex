@@ -34,7 +34,7 @@
 ;;   (require 'gptel-vertex)
 ;;   (gptel-vertex-setup-backend
 ;;     :project-id "your-project-id"
-;;     :location "us-central1")
+;;     :location "us-east5")
 
 ;;; Code:
 (require 'gptel)
@@ -54,8 +54,11 @@
   "Google Cloud Vertex AI support for gptel."
   :group 'gptel)
 
-(defcustom gptel-vertex-default-location "us-central1"
-  "Default GCP region for Vertex AI."
+(defcustom gptel-vertex-default-location "global"
+  "Default GCP region for Vertex AI.
+Use 'global' for maximum availability (recommended for Claude models).
+Specific regions like 'us-east1' or 'europe-west1' can be used for 
+data residency requirements (10% pricing premium for Claude models)."
   :type 'string
   :group 'gptel-vertex)
 
@@ -84,7 +87,7 @@ Returns the access token string."
   (let ((result (string-trim
                  (shell-command-to-string "gcloud auth print-access-token"))))
     (if (string-match-p "ERROR" result)
-        (error "Could not get GCP access token: %s" result)
+        (error "Could not get GCP access token. Ensure you are logged in with 'gcloud auth login': %s" result)
       result)))
 
 (cl-defmethod gptel-vertex--ensure-auth ((backend gptel-vertex))
@@ -100,9 +103,9 @@ Refreshes the token if it's expired or missing."
             (time-add now (seconds-to-time gptel-vertex-token-refresh-seconds)))))
   (gptel-vertex-access-token backend))
 
-;;; Request handling for Gemini models
+;;; Request handling
 (cl-defmethod gptel-curl--parse-stream ((backend gptel-vertex) info)
-  "Parse a Vertex AI Gemini data stream.
+  "Parse a Vertex AI data stream.
 Return the text response accumulated since the last call to this
 function. Additionally, mutate state INFO to add tool-use
 information if the stream contains it."
@@ -203,15 +206,8 @@ If INCLUDE-TEXT is non-nil, include response text in the prompts list."
                                        :threshold "BLOCK_NONE")]))
               params)
           (when gptel--system-message
-            (plist-put prompts-plist :system_instruction
-                       `(:parts (:text ,gptel--system-message))))
-          (when gptel-use-tools
-            (when (eq gptel-use-tools 'force)
-              (plist-put prompts-plist :tool_config
-                         '(:function_calling_config (:mode "ANY"))))
-            (when gptel-tools
-              (plist-put prompts-plist :tools
-                         (gptel--parse-tools backend gptel-tools))))
+            (plist-put prompts-plist :systemInstruction
+                       `(:parts [(:text ,gptel--system-message)])))
           (when gptel-temperature
             (setq params
                   (plist-put params :temperature (max gptel-temperature 1.0))))
@@ -226,61 +222,29 @@ If INCLUDE-TEXT is non-nil, include response text in the prompts list."
            (gptel-backend-request-params backend)
            (gptel--model-request-params gptel-model)))
       ;; Claude request format via Vertex
-      (when gptel--system-message
-        (push (list :role "system" :content gptel--system-message) prompts))
-      (let ((prompts-plist
-             `(:anthropic_version "vertex-2024-01-01"
-               :messages [,@prompts]
-               :stream ,(or gptel-stream :json-false))))
-        (when gptel-temperature
-          (plist-put prompts-plist :temperature gptel-temperature))
-        (when gptel-max-tokens
-          (plist-put prompts-plist :max_tokens gptel-max-tokens))
-        (gptel--merge-plists
-         prompts-plist
-         gptel--request-params
-         (gptel-backend-request-params backend)
-         (gptel--model-request-params gptel-model))))))
-
-(cl-defmethod gptel--parse-tools ((backend gptel-vertex) tools)
-  "Parse TOOLS to the Vertex AI tool definition spec.
-TOOLS is a list of `gptel-tool' structs."
-  (let ((publisher (gptel-vertex-publisher backend)))
-    (if (equal publisher "google")
-        ;; Gemini tools format
-        (cl-loop
-         for tool in (ensure-list tools)
-         collect
-         (list
-          :name (gptel-tool-name tool)
-          :description (gptel-tool-description tool)
-          :parameters
-          (if (not (gptel-tool-args tool))
-              :null
-            (list :type "object"
-                  :properties
-                  (cl-loop
-                   for arg in (gptel-tool-args tool)
-                   for argspec = (copy-sequence arg)
-                   for name = (plist-get arg :name)
-                   for newname = (or (and (keywordp name) name)
-                                     (make-symbol (concat ":" name)))
-                   do
-                   (cl-remf argspec :name)
-                   (cl-remf argspec :optional)
-                   if (equal (plist-get arg :type) "string")
-                   do (cl-remf argspec :format)
-                   append (list newname argspec))
-                  :required
-                  (vconcat
-                   (delq nil (mapcar
-                              (lambda (arg) (and (not (plist-get arg :optional))
-                                            (plist-get arg :name)))
-                              (gptel-tool-args tool)))))))
-         into tool-specs
-         finally return `[(:function_declarations ,(vconcat tool-specs))])
-      ;; Claude tools format - delegate to OpenAI format
-      (cl-call-next-method))))
+      (let ((claude-messages
+             (cl-loop for prompt in prompts
+                      collect (cond
+                               ((equal (plist-get prompt :role) "user")
+                                `(:role "user" 
+                                  :content ,(plist-get (aref (plist-get prompt :parts) 0) :text)))
+                               ((equal (plist-get prompt :role) "model")
+                                `(:role "assistant"
+                                  :content ,(plist-get (aref (plist-get prompt :parts) 0) :text)))))))
+        (when gptel--system-message
+          (push `(:role "system" :content ,gptel--system-message) claude-messages))
+        (let ((prompts-plist
+               `(:anthropic_version "vertex-2023-10-16"
+                 :messages ,(vconcat claude-messages)
+                 :stream ,(or gptel-stream :json-false)
+                 :max_tokens ,(or gptel-max-tokens 4096))))
+          (when gptel-temperature
+            (plist-put prompts-plist :temperature gptel-temperature))
+          (gptel--merge-plists
+           prompts-plist
+           gptel--request-params
+           (gptel-backend-request-params backend)
+           (gptel--model-request-params gptel-model)))))))
 
 (cl-defmethod gptel--parse-list ((backend gptel-vertex) prompt-list)
   "Parse PROMPT-LIST for Vertex AI."
@@ -314,7 +278,7 @@ TOOLS is a list of `gptel-tool' structs."
   "Parse the current buffer for Vertex AI prompts."
   (let ((publisher (gptel-vertex-publisher backend)))
     (if (equal publisher "google")
-        ;; Gemini format - similar to gptel-gemini
+        ;; Gemini format
         (let ((prompts) (prev-pt (point)))
           (if (or gptel-mode gptel-track-response)
               (while (and (or (not max-entries) (>= max-entries 0))
@@ -361,65 +325,21 @@ TOOLS is a list of `gptel-tool' structs."
 
 ;;; Model definitions
 (defconst gptel-vertex--gemini-models
-  '((gemini-1.5-pro-002
-     :description "Most capable Gemini 1.5 model for complex tasks"
-     :capabilities (tool-use json media)
-     :context-window 2097
-     :input-cost 1.25
-     :output-cost 5.00
-     :cutoff-date "2024-05")
-    (gemini-1.5-flash-002
-     :description "Fast and efficient Gemini 1.5 model"
-     :capabilities (tool-use json media)
-     :context-window 1048
-     :input-cost 0.075
-     :output-cost 0.30
-     :cutoff-date "2024-05")
-    (gemini-2.0-flash-exp
-     :description "Experimental Gemini 2.0 Flash model"
-     :capabilities (tool-use json media)
-     :context-window 1048
-     :input-cost 0.00
-     :output-cost 0.00))
+  '(gemini-2.5-flash
+    gemini-2.5-pro)
   "List of available Gemini models via Vertex AI.")
 
 (defconst gptel-vertex--claude-models
-  '((claude-3-opus@20240229
-     :description "Most capable Claude 3 model"
-     :capabilities (tool-use)
-     :context-window 200
-     :input-cost 15.00
-     :output-cost 75.00
-     :cutoff-date "2023-08")
-    (claude-3-sonnet@20240229
-     :description "Balanced Claude 3 model"
-     :capabilities (tool-use)
-     :context-window 200
-     :input-cost 3.00
-     :output-cost 15.00
-     :cutoff-date "2023-08")
-    (claude-3-haiku@20240307
-     :description "Fast Claude 3 model"
-     :capabilities (tool-use)
-     :context-window 200
-     :input-cost 0.25
-     :output-cost 1.25
-     :cutoff-date "2023-08")
-    (claude-3-5-sonnet@20240620
-     :description "Latest Claude 3.5 Sonnet"
-     :capabilities (tool-use)
-     :context-window 200
-     :input-cost 3.00
-     :output-cost 15.00
-     :cutoff-date "2024-04")
-    (claude-3-5-sonnet-v2@20241022
-     :description "Claude 3.5 Sonnet v2"
-     :capabilities (tool-use)
-     :context-window 200
-     :input-cost 3.00
-     :output-cost 15.00
-     :cutoff-date "2024-04"))
-  "List of available Claude models via Vertex AI.")
+  '((claude-sonnet-4-5@20250929 :description "Claude Sonnet 4.5 - Most capable balanced model")
+    (claude-sonnet-4@20250514 :description "Claude Sonnet 4")
+    (claude-3-7-sonnet@20250219 :description "Claude Sonnet 3.7 (Deprecated Oct 28, 2025)")
+    (claude-opus-4-1@20250805 :description "Claude Opus 4.1 - Most capable")
+    (claude-opus-4@20250514 :description "Claude Opus 4")
+    (claude-3-opus@20240229 :description "Claude Opus 3 (Deprecated Jun 30, 2025)")
+    (claude-haiku-4-5@20251001 :description "Claude Haiku 4.5 - Fast and efficient")
+    (claude-3-5-haiku@20241022 :description "Claude Haiku 3.5")
+    (claude-3-haiku@20240307 :description "Claude Haiku 3"))
+  "List of available Claude models via Vertex AI with version identifiers.")
 
 ;;; Backend creation
 ;;;###autoload
@@ -442,28 +362,18 @@ LOCATION is the GCP region, defaults to `gptel-vertex-default-location'.
 CURL-ARGS (optional) is a list of additional Curl arguments.
 
 MODELS is a list of available model names, as symbols.
-Additionally, you can specify supported LLM capabilities like
-vision or tool-use by appending a plist to the model with more
-information. Defaults to Gemini models. For Claude models, use
-`gptel-vertex--claude-models'.
 
-STREAM is a boolean to enable streaming responses, defaults to
-false.
+STREAM is a boolean to enable streaming responses.
 
 PROTOCOL (optional) specifies the protocol, \"https\" by default.
 
-HOST (optional) overrides the default host. If not specified,
-it's constructed from the location.
+HOST (optional) overrides the default host.
 
-HEADER (optional) is for additional headers to send with each
-request. It should be an alist or a function that returns an
-alist.
+HEADER (optional) is for additional headers.
 
-KEY is not used for Vertex AI (uses gcloud auth instead) but
-kept for compatibility.
+KEY is not used for Vertex AI (uses gcloud auth).
 
-REQUEST-PARAMS (optional) is a plist of additional HTTP request
-parameters supported by the API."
+REQUEST-PARAMS (optional) is a plist of additional parameters."
   (declare (indent 1))
   (unless project-id
     (error "PROJECT-ID is required for Vertex AI backend"))
@@ -479,7 +389,10 @@ parameters supported by the API."
                    :curl-args curl-args
                    :name name
                    :host computed-host
-                   :header header
+                   :header (or header
+                               (lambda ()
+                                 (let ((token (gptel-vertex--ensure-auth gptel-backend)))
+                                   `(("Authorization" . ,(format "Bearer %s" token))))))
                    :models (gptel--process-models models)
                    :protocol protocol
                    :endpoint endpoint
@@ -490,13 +403,14 @@ parameters supported by the API."
                    :location location
                    :publisher publisher
                    :url (lambda ()
-                          (let* ((token (gptel-vertex--ensure-auth gptel-backend))
-                                 (model-name (gptel--model-name gptel-model))
+                          (let* ((model-name (gptel--model-name gptel-model))
                                  (is-claude (string-match-p "claude" model-name))
                                  (publisher (if is-claude "anthropic" "google"))
                                  (method (cond
-                                          (is-claude "streamRawPredict")
-                                          ((and stream gptel-use-curl gptel-stream)
+                                          ((and is-claude gptel-stream)
+                                           "streamRawPredict")
+                                          (is-claude "rawPredict")
+                                          ((and gptel-stream gptel-use-curl)
                                            "streamGenerateContent")
                                           (t "generateContent"))))
                             (format "%s://%s/v1/projects/%s/locations/%s/publishers/%s/models/%s:%s"
@@ -517,69 +431,47 @@ parameters supported by the API."
                                        (name "Vertex-AI")
                                        project-id
                                        (location gptel-vertex-default-location)
-                                       (models 'gemini)
-                                       (stream t)
-                                       (default-model nil))
-  "Set up a Vertex AI backend for gptel and optionally set it as default.
+                                       (models 'all)
+                                       (stream t))
+  "Set up a Vertex AI backend for gptel.
 
 NAME is the name for the backend (default \"Vertex-AI\").
 
 PROJECT-ID (required) is your GCP project ID.
 
-LOCATION is the GCP region (default from `gptel-vertex-default-location').
+LOCATION is the GCP region.
 
 MODELS can be:
-  - 'gemini (default) - Use Gemini models
-  - 'claude - Use Claude models
-  - 'both - Use both Gemini and Claude models
+  - 'gemini - Use Gemini models only
+  - 'claude - Use Claude models only
+  - 'all (default) - Use all available models
   - A list of specific model symbols
 
-STREAM enables streaming responses (default t).
-
-DEFAULT-MODEL if specified, sets this model as the default."
+STREAM enables streaming responses (default t)."
   (unless project-id
     (setq project-id (read-string "Enter your GCP project ID: ")))
   
-  (let ((model-list
-         (pcase models
-           ('gemini gptel-vertex--gemini-models)
-           ('claude gptel-vertex--claude-models)
-           ('both (append gptel-vertex--gemini-models
+  (let* ((model-list
+          (pcase models
+            ('gemini gptel-vertex--gemini-models)
+            ('claude gptel-vertex--claude-models)
+            ('all (append gptel-vertex--gemini-models
                          gptel-vertex--claude-models))
-           ((pred listp) models)
-           (_ gptel-vertex--gemini-models))))
+            ((pred listp) models)
+            (_ (append gptel-vertex--gemini-models
+                      gptel-vertex--claude-models))))
+         (backend (gptel-make-vertex name
+                    :project-id project-id
+                    :location location
+                    :models model-list
+                    :stream stream)))
     
-    (gptel-make-vertex name
-      :project-id project-id
-      :location location
-      :models model-list
-      :stream stream)
+    ;; Set as default backend with first model
+    (setq-default gptel-backend backend)
+    (setq-default gptel-model (car model-list))
     
-    ;; Set as default if requested
-    (when default-model
-      (setq-default gptel-backend (gptel-get-backend name))
-      (setq-default gptel-model (or default-model
-                                    (caar model-list))))
-    
-    (message "Vertex AI backend '%s' configured successfully!" name)
-    (gptel-get-backend name)))
-
-;;; Region information
-(defconst gptel-vertex-regions
-  '(("us-central1" . "General purpose, good latency for US")
-    ("us-east5" . "Required for Claude models")
-    ("us-east4" . "Alternative US East region")
-    ("us-west1" . "US West coast")
-    ("us-west4" . "Alternative US West region")
-    ("europe-west1" . "Belgium")
-    ("europe-west2" . "London")
-    ("europe-west3" . "Frankfurt")
-    ("europe-west4" . "Netherlands")
-    ("asia-northeast1" . "Tokyo")
-    ("asia-northeast3" . "Seoul")
-    ("asia-south1" . "Mumbai")
-    ("asia-southeast1" . "Singapore"))
-  "Available GCP regions for Vertex AI and their descriptions.")
+    (message "Vertex AI backend '%s' configured and set as default" name)
+    backend))
 
 (provide 'gptel-vertex)
 ;;; gptel-vertex.el ends here
