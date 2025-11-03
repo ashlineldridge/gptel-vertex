@@ -120,6 +120,9 @@ Refreshes the token if it's expired or will expire soon."
     (when (or (not (gptel-vertex-access-token backend))
               (not (gptel-vertex-token-expiry backend))
               (time-less-p (gptel-vertex-token-expiry backend) now))
+      ;; Token needs refresh
+      (when gptel-log-level
+        (message "gptel-vertex: Refreshing access token"))
       (let ((token (gptel-vertex--get-access-token)))
         (setf (gptel-vertex-access-token backend) token
               (gptel-vertex-token-expiry backend)
@@ -370,45 +373,45 @@ REQUEST-PARAMS: Additional API request parameters."
   (unless project-id
     (user-error "PROJECT-ID is required for Vertex AI backend"))
 
-  (let* ((backend-var nil))
-    ;; Create header function if not provided
-    (unless header
-      (setq header
-            (lambda ()
-              (let* ((backend (or backend-var gptel-backend))
-                     (token (gptel-vertex--ensure-auth backend)))
-                `(("Authorization" . ,(format "Bearer %s" token)))))))
+  ;; Create header function if not provided
+  (unless header
+    (setq header
+          (lambda ()
+            ;; Ensure we have a valid vertex backend
+            (unless (gptel-vertex-p gptel-backend)
+              (error "Current backend is not a Vertex AI backend"))
+            (let ((token (gptel-vertex--ensure-auth gptel-backend)))
+              `(("Authorization" . ,(format "Bearer %s" token)))))))
 
-    ;; Create the backend struct
-    (setq backend-var
-          (gptel--make-vertex
-           :name name
-           :host host
-           :header header
-           :models (gptel--process-models models)
-           :protocol protocol
-           :stream stream
-           :request-params request-params
-           :curl-args curl-args
-           :project-id project-id
-           :location location
-           :publisher "google"  ; Default, updated dynamically
-           :url (lambda ()
-                  (let* ((model-name (gptel--model-name gptel-model))
-                         (is-claude (string-match-p "claude" model-name))
-                         (publisher (if is-claude "anthropic" "google"))
-                         (method (cond
-                                  ((and is-claude gptel-stream) "streamRawPredict")
-                                  (is-claude "rawPredict")
-                                  ((and gptel-stream gptel-use-curl) "streamGenerateContent")
-                                  (t "generateContent"))))
-                    (format "%s://%s/v1/projects/%s/locations/%s/publishers/%s/models/%s:%s"
-                            protocol host project-id location publisher model-name method)))))
+  (let ((backend
+         (gptel--make-vertex
+          :name name
+          :host host
+          :header header
+          :models (gptel--process-models models)
+          :protocol protocol
+          :stream stream
+          :request-params request-params
+          :curl-args curl-args
+          :project-id project-id
+          :location location
+          :publisher "google"  ; Default, updated dynamically
+          :url (lambda ()
+                 (let* ((model-name (gptel--model-name gptel-model))
+                        (is-claude (string-match-p "claude" model-name))
+                        (publisher (if is-claude "anthropic" "google"))
+                        (method (cond
+                                 ((and is-claude gptel-stream) "streamRawPredict")
+                                 (is-claude "rawPredict")
+                                 ((and gptel-stream gptel-use-curl) "streamGenerateContent")
+                                 (t "generateContent"))))
+                   (format "%s://%s/v1/projects/%s/locations/%s/publishers/%s/models/%s:%s"
+                           protocol host project-id location publisher model-name method))))))
 
-    (prog1 backend-var
+    (prog1 backend
       ;; Register the backend
       (setf (alist-get name gptel--known-backends nil nil #'equal)
-            backend-var))))
+            backend))))
 
 (provide 'gptel-vertex)
 
