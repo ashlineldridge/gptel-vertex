@@ -68,6 +68,20 @@ Default refreshes 100 seconds before expiry to ensure reliability."
   :type 'integer
   :group 'gptel-vertex)
 
+(defcustom gptel-vertex-models
+  '((gemini-2.5-flash :description "Gemini 2.5 Flash")
+    (gemini-2.5-pro :description "Gemini 2.5 Pro")
+    (claude-sonnet-4-5@20250929 :description "Claude Sonnet 4.5")
+    (claude-opus-4-1@20250805 :description "Claude Opus 4.1"))
+  "Models available in Vertex AI.
+
+Each entry is a list of (MODEL-ID . PROPERTIES) where MODEL-ID is the
+identifier used in Vertex AI API calls.
+
+Note: Claude models require the @VERSION format for Vertex AI."
+  :type '(alist :key-type symbol :value-type plist)
+  :group 'gptel-vertex)
+
 ;;; Backend Definition
 
 (cl-defstruct (gptel-vertex (:constructor gptel--make-vertex)
@@ -321,12 +335,7 @@ Optional MAX-ENTRIES limits the number of entries parsed."
           (location gptel-vertex-default-location)
           (host (format "%s-aiplatform.googleapis.com" location))
           header
-          (models '((gemini-2.0-flash-exp :description "Gemini 2.0 Flash (experimental)")
-                    (gemini-1.5-pro :description "Gemini 1.5 Pro")
-                    (gemini-1.5-flash :description "Gemini 1.5 Flash")
-                    (claude-3-5-sonnet-v2@20241022 :description "Claude 3.5 Sonnet")
-                    (claude-3-5-haiku@20241022 :description "Claude 3.5 Haiku")
-                    (claude-3-opus@20240229 :description "Claude 3 Opus")))
+          (models gptel-vertex-models)
           (stream t)
           (protocol "https")
           curl-args

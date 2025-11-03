@@ -4,13 +4,9 @@ This package adds Google Cloud Vertex AI support to the Emacs gptel package.
 
 ** Installation
 #+begin_src emacs-lisp
-  (use-package gptel-vertex
-    :vc (:url "https://github.com/ashlineldridge/gptel-vertex.el")
-    :init
-    (declare-function gptel-vertex-setup-backend "gptel-vertex")
-    (with-eval-after-load 'gptel
-      (require 'gptel-vertex)
-      (gptel-vertex-setup-backend
-       :project-id "my-gcp-project"
-       :location "us-west1")))
+  (require 'gptel-vertex)
+  (setq gptel-model 'claude-sonnet-4-5@20250929
+        gptel-backend (gptel-make-vertex "VertexAI"
+                                         :project-id "my-gcp-project"
+                                         :location "us-west1"))
 #+end_src

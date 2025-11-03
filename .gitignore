@@ -1,7 +1,10 @@
 *.elc
+*.log
+*.orig
+*.swp
 *~
-\#*\#
 .DS_Store
-/.emacs.desktop
-/.emacs.desktop.lock
-*.cache
+.\#*
+.emacs.desktop
+.emacs.desktop.lock
+\#*\#
