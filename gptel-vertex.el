@@ -210,9 +210,9 @@ PROMPTS is a list of plists with :role and :content keys."
                         (push text content-strs))
                     (error nil)))))))
       ;; Gemini JSON stream format
-      (while (prog1 (search-forward "{" nil t)
-               (backward-char 1))
-        (condition-case nil
+      (condition-case nil
+          (while (prog1 (search-forward "{" nil t)
+                   (backward-char 1))
             (save-match-data
               (when-let* ((response (gptel--json-read))
                           (candidates (plist-get response :candidates))
@@ -221,8 +221,10 @@ PROMPTS is a list of plists with :role and :content keys."
                           (parts (plist-get content :parts)))
                 (cl-loop for part across parts
                          for text = (plist-get part :text)
-                         when text do (push text content-strs))))
-          (error nil))))
+                         when text do (push text content-strs)))))
+        (error
+         ;; Move point back to the opening brace on parse error
+         (goto-char (match-beginning 0)))))
     (apply #'concat (nreverse content-strs))))
 
 (cl-defmethod gptel--parse-response ((backend gptel-vertex) response info)
