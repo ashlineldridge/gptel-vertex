@@ -194,37 +194,25 @@ PROMPTS is a list of plists with :role and :content keys."
          (content-strs))
     (if (equal publisher "anthropic")
         ;; Claude SSE stream format
-        (progn
-          (while (re-search-forward "^event: " nil t)
-            (let ((event-type (buffer-substring-no-properties
-                               (point) (line-end-position))))
-              (when (string-match-p "message_delta\\|content_block_delta" event-type)
-                (forward-line 1)
-                (when (looking-at "^data: ")
-                  (forward-char 6)
-                  (condition-case nil
-                      (when-let* ((json-response (gptel--json-read))
-                                  (delta (plist-get json-response :delta))
-                                  (text (or (plist-get delta :text)
-                                            (plist-get delta :partial_json))))
-                        (push text content-strs))
-                    (error nil)))))))
+        (condition-case nil
+            (while (re-search-forward "^data:" nil t)
+              (save-match-data
+                (when-let* ((response (gptel--json-read))
+                            (delta (plist-get response :delta))
+                            (text (or (plist-get delta :text)
+                                      (plist-get delta :partial_json)))
+                            ((not (eq text :null))))
+                  (push text content-strs))))
+          (error (goto-char (match-beginning 0))))
       ;; Gemini JSON stream format
       (condition-case nil
           (while (prog1 (search-forward "{" nil t)
                    (backward-char 1))
             (save-match-data
               (when-let* ((response (gptel--json-read))
-                          (candidates (plist-get response :candidates))
-                          (candidate (and candidates (aref candidates 0)))
-                          (content (plist-get candidate :content))
-                          (parts (plist-get content :parts)))
-                (cl-loop for part across parts
-                         for text = (plist-get part :text)
-                         when text do (push text content-strs)))))
-        (error
-         ;; Move point back to the opening brace on parse error
-         (goto-char (match-beginning 0)))))
+                          (text (gptel--parse-response backend response _info)))
+                (push text content-strs))))
+        (error (goto-char (match-beginning 0)))))
     (apply #'concat (nreverse content-strs))))
 
 (cl-defmethod gptel--parse-response ((backend gptel-vertex) response info)
