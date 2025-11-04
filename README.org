@@ -1,7 +1,5 @@
 * gptel-vertex
-
-This package adds Google Cloud Vertex AI support to the Emacs gptel package.
-
+This package adds [[https://cloud.google.com/vertex-ai/docs][Google Cloud Vertex AI]] support to the Emacs [[https://github.com/karthink/gptel][gptel]] package.
 ** Installation
 #+begin_src emacs-lisp
   (require 'gptel-vertex)
