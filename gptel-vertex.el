@@ -3,7 +3,7 @@
 ;; Copyright (C) 2025  Ashlin Eldridge
 
 ;; Author: Ashlin Eldridge <ashlin.eldridge@gmail.com>
-;; Keywords: ai, llm, google, gcp, vertex, claude, gemini
+;; Keywords: ai, llm, google, gcp, vertex, anthropic, gemini
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -81,7 +81,7 @@ Common regions:
 - europe-west4, europe-west1 (Europe)
 - asia-northeast1, asia-southeast1 (Asia Pacific)
 
-For Claude models, check regional availability in GCP documentation."
+For Anthropic models, check regional availability in GCP documentation."
   :type 'string
   :group 'gptel-vertex)
 
@@ -146,7 +146,7 @@ Keys:
 - `:output-cost': Output cost in US dollars per million tokens
 - `:cutoff-date': Knowledge cutoff date
 
-Note: Claude models require the @VERSION format for Vertex AI."
+Note: Anthropic models require the @VERSION format for Vertex AI."
   :type '(alist :key-type symbol :value-type plist)
   :group 'gptel-vertex)
 
@@ -199,8 +199,8 @@ Refreshes the token if it's expired or will expire soon."
 
 ;;; Utility functions
 
-(defun gptel-vertex--is-claude-model-p (model-name)
-  "Return non-nil if MODEL-NAME is a Claude model."
+(defun gptel-vertex--is-anthropic-model-p (model-name)
+  "Return non-nil if MODEL-NAME is an Anthropic model."
   (string-match-p "claude" model-name))
 
 ;;; Request handling - This comprehensive implementation handles all request types
@@ -210,20 +210,20 @@ Refreshes the token if it's expired or will expire soon."
 
 PROMPTS is a list of plists with :role and :content keys."
   (let* ((model-name (gptel--model-name gptel-model))
-         (is-claude (gptel-vertex--is-claude-model-p model-name))
-         (publisher (if is-claude "anthropic" "google")))
+         (is-anthropic (gptel-vertex--is-anthropic-model-p model-name))
+         (publisher (if is-anthropic "anthropic" "google")))
 
     ;; Update publisher based on current model
     (setf (gptel-vertex-publisher backend) publisher)
 
-    (if is-claude
-        ;; Claude format via Vertex AI
+    (if is-anthropic
+        ;; Anthropic format via Vertex AI
         (gptel-vertex--request-data-anthropic prompts)
       ;; Gemini format
       (gptel-vertex--request-data-gemini prompts))))
 
 (defun gptel-vertex--request-data-anthropic (prompts)
-  "Build request data for Anthropic Claude models via Vertex AI.
+  "Build request data for Anthropic models via Vertex AI.
 
 PROMPTS is a list of message plists."
   (let ((request-body
@@ -303,8 +303,8 @@ PROMPTS is a list of message plists."
 
 Dispatches to appropriate format based on current model."
   (let* ((model-name (gptel--model-name gptel-model))
-         (is-claude (gptel-vertex--is-claude-model-p model-name)))
-    (if is-claude
+         (is-anthropic (gptel-vertex--is-anthropic-model-p model-name)))
+    (if is-anthropic
         ;; Anthropic format: JSON schema via tool call
         (list
          :name "response_json"
@@ -345,8 +345,8 @@ Gemini's API does not support `additionalProperties'."
 TOOLS is a list of `gptel-tool' structs, which see.
 Dispatches to appropriate format based on current model."
   (let* ((model-name (gptel--model-name gptel-model))
-         (is-claude (gptel-vertex--is-claude-model-p model-name)))
-    (if is-claude
+         (is-anthropic (gptel-vertex--is-anthropic-model-p model-name)))
+    (if is-anthropic
         ;; Anthropic format
         (gptel-vertex--parse-tools-anthropic tools)
       ;; Gemini format
@@ -430,8 +430,8 @@ TOOLS is a list of `gptel-tool' structs."
 TOOL-USE is a list of plists containing tool names, arguments and call results.
 Dispatches to appropriate format based on current model."
   (let* ((model-name (gptel--model-name gptel-model))
-         (is-claude (gptel-vertex--is-claude-model-p model-name)))
-    (if is-claude
+         (is-anthropic (gptel-vertex--is-anthropic-model-p model-name)))
+    (if is-anthropic
         ;; Anthropic format
         (list
          :role "user"
@@ -469,8 +469,8 @@ Dispatches to appropriate format based on current model."
 See generic implementation for full documentation.
 Dispatches based on current model type."
   (let* ((model-name (gptel--model-name gptel-model))
-         (is-claude (gptel-vertex--is-claude-model-p model-name)))
-    (if is-claude
+         (is-anthropic (gptel-vertex--is-anthropic-model-p model-name)))
+    (if is-anthropic
         ;; Anthropic uses :messages
         (let ((prompts (plist-get data :messages)))
           (plist-put data :messages (vconcat prompts (list new-prompt))))
@@ -486,13 +486,13 @@ Dispatches based on current model type."
 Return the text response accumulated since the last call.
 Additionally, mutate state INFO to add tool-use information."
   (let* ((publisher (gptel-vertex-publisher backend))
-         (is-claude (equal publisher "anthropic")))
-    (if is-claude
+         (is-anthropic (equal publisher "anthropic")))
+    (if is-anthropic
         (gptel-vertex--parse-stream-anthropic info)
       (gptel-vertex--parse-stream-gemini backend info))))
 
 (defun gptel-vertex--parse-stream-anthropic (info)
-  "Parse Anthropic Claude SSE streaming response.
+  "Parse Anthropic SSE streaming response.
 
 Return accumulated text since last call.  Mutate INFO with metadata."
   (let ((content-strs)
@@ -594,13 +594,13 @@ INFO is the request info plist.
 If INCLUDE-TEXT is non-nil, include response text in prompts list.
 Dispatches based on current model type."
   (let* ((publisher (gptel-vertex-publisher backend))
-         (is-claude (equal publisher "anthropic")))
-    (if is-claude
+         (is-anthropic (equal publisher "anthropic")))
+    (if is-anthropic
         (gptel-vertex--parse-response-anthropic response info)
       (gptel-vertex--parse-response-gemini backend response info include-text))))
 
 (defun gptel-vertex--parse-response-anthropic (response info)
-  "Parse Anthropic Claude response from Vertex AI.
+  "Parse Anthropic response from Vertex AI.
 
 RESPONSE is the JSON response plist.
 INFO is the request info plist.  Mutate with metadata."
@@ -706,8 +706,8 @@ If INCLUDE-TEXT is non-nil, include response in prompts list."
 Handles both simple (list of strings) and advanced (list of
 role-content pairs) formats.  Dispatches based on current model."
   (let* ((model-name (gptel--model-name gptel-model))
-         (is-claude (gptel-vertex--is-claude-model-p model-name)))
-    (if is-claude
+         (is-anthropic (gptel-vertex--is-anthropic-model-p model-name)))
+    (if is-anthropic
         (gptel-vertex--parse-list-anthropic backend prompt-list)
       (gptel-vertex--parse-list-gemini backend prompt-list))))
 
@@ -785,13 +785,13 @@ PROMPT-LIST is either simple (strings) or advanced (role-content pairs)."
 Optional MAX-ENTRIES limits the number of entries parsed.
 Dispatches based on current model."
   (let* ((model-name (gptel--model-name gptel-model))
-         (is-claude (gptel-vertex--is-claude-model-p model-name)))
-    (if is-claude
+         (is-anthropic (gptel-vertex--is-anthropic-model-p model-name)))
+    (if is-anthropic
         (gptel-vertex--parse-buffer-anthropic backend max-entries)
       (gptel-vertex--parse-buffer-gemini backend max-entries))))
 
 (defun gptel-vertex--parse-buffer-anthropic (backend max-entries)
-  "Parse buffer for Anthropic Claude models via Vertex AI.
+  "Parse buffer for Anthropic models via Vertex AI.
 
 BACKEND is the gptel-vertex backend.
 MAX-ENTRIES limits the number of conversation turns parsed."
@@ -984,8 +984,8 @@ Media files, if present, are placed in `gptel-context'.
 Dispatches based on current model type."
   (when-let* ((media-list (gptel-context--collect-media))
               (model-name (gptel--model-name gptel-model))
-              (is-claude (gptel-vertex--is-claude-model-p model-name)))
-    (if is-claude
+              (is-anthropic (gptel-vertex--is-anthropic-model-p model-name)))
+    (if is-anthropic
         ;; Anthropic format
         (cl-callf (lambda (current)
                     (vconcat
@@ -1013,8 +1013,8 @@ Ensures proper prefix based on model type."
                    (md5 (format "%s%s" (random) (float-time)))
                    nil 24)))
   (let* ((model-name (gptel--model-name gptel-model))
-         (is-claude (gptel-vertex--is-claude-model-p model-name)))
-    (if is-claude
+         (is-anthropic (gptel-vertex--is-anthropic-model-p model-name)))
+    (if is-anthropic
         (if (string-prefix-p "toolu_" tool-id)
             tool-id
           (format "toolu_%s" tool-id))
@@ -1051,7 +1051,7 @@ creates one that adds the Bearer token automatically.
 
 MODELS: List of available models.  Each entry can be a symbol
 or a list (SYMBOL :description STRING ...).  Both Gemini and
-Claude models are supported.
+Anthropic models are supported.
 
 STREAM: Whether to enable response streaming.  Default is t.
 
@@ -1098,11 +1098,11 @@ Example:
           :publisher "google"  ; Default, updated dynamically
           :url (lambda ()
                  (let* ((model-name (gptel--model-name gptel-model))
-                        (is-claude (gptel-vertex--is-claude-model-p model-name))
-                        (publisher (if is-claude "anthropic" "google"))
+                        (is-anthropic (gptel-vertex--is-anthropic-model-p model-name))
+                        (publisher (if is-anthropic "anthropic" "google"))
                         (method (cond
-                                 ((and is-claude gptel-stream) "streamRawPredict")
-                                 (is-claude "rawPredict")
+                                 ((and is-anthropic gptel-stream) "streamRawPredict")
+                                 (is-anthropic "rawPredict")
                                  ((and gptel-stream gptel-use-curl) "streamGenerateContent")
                                  (t "generateContent"))))
                    (format "%s://%s/v1/projects/%s/locations/%s/publishers/%s/models/%s:%s"
