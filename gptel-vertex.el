@@ -197,11 +197,37 @@ Refreshes the token if it's expired or will expire soon."
               (time-add now (seconds-to-time gptel-vertex-token-refresh-seconds)))))
     (gptel-vertex-access-token backend)))
 
-;;; Utility functions
+;;; Publisher Registry
 
-(defun gptel-vertex--is-anthropic-model-p (model-name)
-  "Return non-nil if MODEL-NAME is an Anthropic model."
-  (string-match-p "claude" model-name))
+(defconst gptel-vertex--publishers
+  '((anthropic
+     :name "anthropic"
+     :detect (lambda (model) (string-match-p "^claude-" model))
+     :api-version "vertex-2023-10-16")
+    (google
+     :name "google"
+     :detect (lambda (model) (string-match-p "^gemini-" model))))
+  "Publisher configurations for Vertex AI.
+
+Each entry is a list of (PUBLISHER-SYMBOL . PROPERTIES) where:
+- PUBLISHER-SYMBOL: Internal identifier (anthropic, google, etc.)
+- :name - Publisher name used in Vertex AI API paths
+- :detect - Function to detect if a model belongs to this publisher
+- :api-version - API version string (for publishers that require it)")
+
+(defun gptel-vertex--detect-publisher (model-name)
+  "Return publisher symbol for MODEL-NAME, or nil if unknown."
+  (cl-loop for (publisher . props) in gptel-vertex--publishers
+           when (funcall (plist-get props :detect) model-name)
+           return publisher))
+
+(defun gptel-vertex--get-publisher-name (publisher)
+  "Return API publisher name string for PUBLISHER symbol."
+  (plist-get (cdr (assq publisher gptel-vertex--publishers)) :name))
+
+(defun gptel-vertex--get-api-version (publisher)
+  "Return API version for PUBLISHER symbol, or nil if not applicable."
+  (plist-get (cdr (assq publisher gptel-vertex--publishers)) :api-version))
 
 ;;; Request handling - This comprehensive implementation handles all request types
 
@@ -210,17 +236,16 @@ Refreshes the token if it's expired or will expire soon."
 
 PROMPTS is a list of plists with :role and :content keys."
   (let* ((model-name (gptel--model-name gptel-model))
-         (is-anthropic (gptel-vertex--is-anthropic-model-p model-name))
-         (publisher (if is-anthropic "anthropic" "google")))
-
-    ;; Update publisher based on current model
-    (setf (gptel-vertex-publisher backend) publisher)
-
-    (if is-anthropic
-        ;; Anthropic format via Vertex AI
-        (gptel-vertex--request-data-anthropic prompts)
-      ;; Gemini format
-      (gptel-vertex--request-data-gemini prompts))))
+         (publisher (or (gptel-vertex--detect-publisher model-name)
+                        (error "Unknown model type for Vertex AI: %s" model-name))))
+    ;; Update publisher slot with API name
+    (setf (gptel-vertex-publisher backend)
+          (gptel-vertex--get-publisher-name publisher))
+    ;; Dispatch to publisher-specific implementation
+    (pcase publisher
+      ('anthropic (gptel-vertex--request-data-anthropic prompts))
+      ('google (gptel-vertex--request-data-gemini prompts))
+      (_ (error "Unsupported publisher: %s" publisher)))))
 
 (defun gptel-vertex--request-data-anthropic (prompts)
   "Build request data for Anthropic models via Vertex AI.
@@ -303,18 +328,21 @@ PROMPTS is a list of message plists."
 
 Dispatches to appropriate format based on current model."
   (let* ((model-name (gptel--model-name gptel-model))
-         (is-anthropic (gptel-vertex--is-anthropic-model-p model-name)))
-    (if is-anthropic
-        ;; Anthropic format: JSON schema via tool call
-        (list
-         :name "response_json"
-         :description "Record JSON output according to user prompt"
-         :input_schema (gptel--preprocess-schema
-                        (gptel--dispatch-schema-type schema)))
-      ;; Gemini format: response MIME type and schema
-      (list :responseMimeType "application/json"
-            :responseSchema (gptel--preprocess-schema
-                             (gptel--dispatch-schema-type schema))))))
+         (publisher (gptel-vertex--detect-publisher model-name)))
+    (pcase publisher
+      ('anthropic
+       ;; Anthropic format: JSON schema via tool call
+       (list
+        :name "response_json"
+        :description "Record JSON output according to user prompt"
+        :input_schema (gptel--preprocess-schema
+                       (gptel--dispatch-schema-type schema))))
+      ('google
+       ;; Gemini format: response MIME type and schema
+       (list :responseMimeType "application/json"
+             :responseSchema (gptel--preprocess-schema
+                              (gptel--dispatch-schema-type schema))))
+      (_ (error "Unsupported publisher for schema: %s" publisher)))))
 
 (defun gptel-vertex--gemini-filter-schema (schema)
   "Destructively filter unsupported attributes from SCHEMA.
@@ -345,12 +373,11 @@ Gemini's API does not support `additionalProperties'."
 TOOLS is a list of `gptel-tool' structs, which see.
 Dispatches to appropriate format based on current model."
   (let* ((model-name (gptel--model-name gptel-model))
-         (is-anthropic (gptel-vertex--is-anthropic-model-p model-name)))
-    (if is-anthropic
-        ;; Anthropic format
-        (gptel-vertex--parse-tools-anthropic tools)
-      ;; Gemini format
-      (gptel-vertex--parse-tools-gemini tools))))
+         (publisher (gptel-vertex--detect-publisher model-name)))
+    (pcase publisher
+      ('anthropic (gptel-vertex--parse-tools-anthropic tools))
+      ('google (gptel-vertex--parse-tools-gemini tools))
+      (_ (error "Unsupported publisher for tools: %s" publisher)))))
 
 (defun gptel-vertex--parse-tools-anthropic (tools)
   "Parse TOOLS to Anthropic API format for Vertex AI.
@@ -430,38 +457,41 @@ TOOLS is a list of `gptel-tool' structs."
 TOOL-USE is a list of plists containing tool names, arguments and call results.
 Dispatches to appropriate format based on current model."
   (let* ((model-name (gptel--model-name gptel-model))
-         (is-anthropic (gptel-vertex--is-anthropic-model-p model-name)))
-    (if is-anthropic
-        ;; Anthropic format
-        (list
-         :role "user"
-         :content
-         (vconcat
-          (mapcar
-           (lambda (tool-call)
-             (let* ((result (plist-get tool-call :result))
-                    (formatted
-                     (list :type "tool_result"
-                           :tool_use_id (plist-get tool-call :id)
-                           :content (if (stringp result) result
-                                      (prin1-to-string result)))))
-               (prog1 formatted
-                 (when (plist-get tool-call :error)
-                   (plist-put formatted :is_error t)))))
-           tool-use)))
-      ;; Gemini format
-      (list
-       :role "user"
-       :parts
-       (vconcat
-        (mapcar
-         (lambda (tool-call)
-           (let ((result (plist-get tool-call :result))
-                 (name (plist-get tool-call :name)))
-             `(:functionResponse
-               (:name ,name :response
-                (:name ,name :content ,result)))))
-         tool-use))))))
+         (publisher (gptel-vertex--detect-publisher model-name)))
+    (pcase publisher
+      ('anthropic
+       ;; Anthropic format
+       (list
+        :role "user"
+        :content
+        (vconcat
+         (mapcar
+          (lambda (tool-call)
+            (let* ((result (plist-get tool-call :result))
+                   (formatted
+                    (list :type "tool_result"
+                          :tool_use_id (plist-get tool-call :id)
+                          :content (if (stringp result) result
+                                     (prin1-to-string result)))))
+              (prog1 formatted
+                (when (plist-get tool-call :error)
+                  (plist-put formatted :is_error t)))))
+          tool-use))))
+      ('google
+       ;; Gemini format
+       (list
+        :role "user"
+        :parts
+        (vconcat
+         (mapcar
+          (lambda (tool-call)
+            (let ((result (plist-get tool-call :result))
+                  (name (plist-get tool-call :name)))
+              `(:functionResponse
+                (:name ,name :response
+                 (:name ,name :content ,result)))))
+          tool-use))))
+      (_ (error "Unsupported publisher for tool results: %s" publisher)))))
 
 (cl-defmethod gptel--inject-prompt ((_backend gptel-vertex) data new-prompt &optional _position)
   "Append NEW-PROMPT to existing prompts in query DATA.
@@ -469,14 +499,17 @@ Dispatches to appropriate format based on current model."
 See generic implementation for full documentation.
 Dispatches based on current model type."
   (let* ((model-name (gptel--model-name gptel-model))
-         (is-anthropic (gptel-vertex--is-anthropic-model-p model-name)))
-    (if is-anthropic
-        ;; Anthropic uses :messages
-        (let ((prompts (plist-get data :messages)))
-          (plist-put data :messages (vconcat prompts (list new-prompt))))
-      ;; Gemini uses :contents
-      (let ((prompts (plist-get data :contents)))
-        (plist-put data :contents (vconcat prompts (list new-prompt)))))))
+         (publisher (gptel-vertex--detect-publisher model-name)))
+    (pcase publisher
+      ('anthropic
+       ;; Anthropic uses :messages
+       (let ((prompts (plist-get data :messages)))
+         (plist-put data :messages (vconcat prompts (list new-prompt)))))
+      ('google
+       ;; Gemini uses :contents
+       (let ((prompts (plist-get data :contents)))
+         (plist-put data :contents (vconcat prompts (list new-prompt)))))
+      (_ (error "Unsupported publisher for inject-prompt: %s" publisher)))))
 
 ;;; Response parsing - Handles streaming and non-streaming responses
 
@@ -485,15 +518,16 @@ Dispatches based on current model type."
 
 Return the text response accumulated since the last call.
 Additionally, mutate state INFO to add tool-use information."
-  (let* ((publisher (gptel-vertex-publisher backend))
-         (is-anthropic (equal publisher "anthropic")))
-    (if is-anthropic
-        (gptel-vertex--parse-stream-anthropic info)
-      (gptel-vertex--parse-stream-gemini backend info))))
+  (let ((publisher-name (gptel-vertex-publisher backend)))
+    (pcase publisher-name
+      ("anthropic" (gptel-vertex--parse-stream-anthropic backend info))
+      ("google" (gptel-vertex--parse-stream-gemini backend info))
+      (_ (error "Unknown publisher in stream parsing: %s" publisher-name)))))
 
-(defun gptel-vertex--parse-stream-anthropic (info)
+(defun gptel-vertex--parse-stream-anthropic (_backend info)
   "Parse Anthropic SSE streaming response.
 
+BACKEND is the gptel-vertex backend (unused but kept for consistency).
 Return accumulated text since last call.  Mutate INFO with metadata."
   (let ((content-strs)
         (pt (point)))
@@ -593,15 +627,16 @@ Return accumulated text since last call.  Mutate INFO with metadata."
 INFO is the request info plist.
 If INCLUDE-TEXT is non-nil, include response text in prompts list.
 Dispatches based on current model type."
-  (let* ((publisher (gptel-vertex-publisher backend))
-         (is-anthropic (equal publisher "anthropic")))
-    (if is-anthropic
-        (gptel-vertex--parse-response-anthropic response info)
-      (gptel-vertex--parse-response-gemini backend response info include-text))))
+  (let ((publisher-name (gptel-vertex-publisher backend)))
+    (pcase publisher-name
+      ("anthropic" (gptel-vertex--parse-response-anthropic backend response info))
+      ("google" (gptel-vertex--parse-response-gemini backend response info include-text))
+      (_ (error "Unknown publisher in response parsing: %s" publisher-name)))))
 
-(defun gptel-vertex--parse-response-anthropic (response info)
+(defun gptel-vertex--parse-response-anthropic (_backend response info)
   "Parse Anthropic response from Vertex AI.
 
+BACKEND is the gptel-vertex backend (unused but kept for consistency).
 RESPONSE is the JSON response plist.
 INFO is the request info plist.  Mutate with metadata."
   ;; Store metadata
@@ -706,10 +741,11 @@ If INCLUDE-TEXT is non-nil, include response in prompts list."
 Handles both simple (list of strings) and advanced (list of
 role-content pairs) formats.  Dispatches based on current model."
   (let* ((model-name (gptel--model-name gptel-model))
-         (is-anthropic (gptel-vertex--is-anthropic-model-p model-name)))
-    (if is-anthropic
-        (gptel-vertex--parse-list-anthropic backend prompt-list)
-      (gptel-vertex--parse-list-gemini backend prompt-list))))
+         (publisher (gptel-vertex--detect-publisher model-name)))
+    (pcase publisher
+      ('anthropic (gptel-vertex--parse-list-anthropic backend prompt-list))
+      ('google (gptel-vertex--parse-list-gemini backend prompt-list))
+      (_ (error "Unsupported publisher for parse-list: %s" publisher)))))
 
 (defun gptel-vertex--parse-list-anthropic (backend prompt-list)
   "Parse PROMPT-LIST for Anthropic models via Vertex AI.
@@ -785,10 +821,11 @@ PROMPT-LIST is either simple (strings) or advanced (role-content pairs)."
 Optional MAX-ENTRIES limits the number of entries parsed.
 Dispatches based on current model."
   (let* ((model-name (gptel--model-name gptel-model))
-         (is-anthropic (gptel-vertex--is-anthropic-model-p model-name)))
-    (if is-anthropic
-        (gptel-vertex--parse-buffer-anthropic backend max-entries)
-      (gptel-vertex--parse-buffer-gemini backend max-entries))))
+         (publisher (gptel-vertex--detect-publisher model-name)))
+    (pcase publisher
+      ('anthropic (gptel-vertex--parse-buffer-anthropic backend max-entries))
+      ('google (gptel-vertex--parse-buffer-gemini backend max-entries))
+      (_ (error "Unsupported publisher for parse-buffer: %s" publisher)))))
 
 (defun gptel-vertex--parse-buffer-anthropic (backend max-entries)
   "Parse buffer for Anthropic models via Vertex AI.
@@ -984,22 +1021,25 @@ Media files, if present, are placed in `gptel-context'.
 Dispatches based on current model type."
   (when-let* ((media-list (gptel-context--collect-media))
               (model-name (gptel--model-name gptel-model))
-              (is-anthropic (gptel-vertex--is-anthropic-model-p model-name)))
-    (if is-anthropic
-        ;; Anthropic format
-        (cl-callf (lambda (current)
-                    (vconcat
-                     (gptel-vertex--anthropic-parse-multipart media-list)
-                     (cl-typecase current
-                       (string `((:type "text" :text ,current)))
-                       (vector current)
-                       (t current))))
-            (plist-get (car prompts) :content))
-      ;; Gemini format
-      (cl-callf (lambda (current)
-                  (vconcat (gptel-vertex--gemini-parse-multipart media-list)
-                           current))
-          (plist-get (car prompts) :parts)))))
+              (publisher (gptel-vertex--detect-publisher model-name)))
+    (pcase publisher
+      ('anthropic
+       ;; Anthropic format
+       (cl-callf (lambda (current)
+                   (vconcat
+                    (gptel-vertex--anthropic-parse-multipart media-list)
+                    (cl-typecase current
+                      (string `((:type "text" :text ,current)))
+                      (vector current)
+                      (t current))))
+           (plist-get (car prompts) :content)))
+      ('google
+       ;; Gemini format
+       (cl-callf (lambda (current)
+                   (vconcat (gptel-vertex--gemini-parse-multipart media-list)
+                            current))
+           (plist-get (car prompts) :parts)))
+      (_ (error "Unsupported publisher for inject-media: %s" publisher)))))
 
 ;;; Utility functions for tool IDs
 
@@ -1013,12 +1053,14 @@ Ensures proper prefix based on model type."
                    (md5 (format "%s%s" (random) (float-time)))
                    nil 24)))
   (let* ((model-name (gptel--model-name gptel-model))
-         (is-anthropic (gptel-vertex--is-anthropic-model-p model-name)))
-    (if is-anthropic
-        (if (string-prefix-p "toolu_" tool-id)
-            tool-id
-          (format "toolu_%s" tool-id))
-      tool-id)))
+         (publisher (gptel-vertex--detect-publisher model-name)))
+    (pcase publisher
+      ('anthropic
+       (if (string-prefix-p "toolu_" tool-id)
+           tool-id
+         (format "toolu_%s" tool-id)))
+      ('google tool-id)
+      (_ tool-id))))
 
 ;;; User-facing functions
 
@@ -1098,15 +1140,18 @@ Example:
           :publisher "google"  ; Default, updated dynamically
           :url (lambda ()
                  (let* ((model-name (gptel--model-name gptel-model))
-                        (is-anthropic (gptel-vertex--is-anthropic-model-p model-name))
-                        (publisher (if is-anthropic "anthropic" "google"))
-                        (method (cond
-                                 ((and is-anthropic gptel-stream) "streamRawPredict")
-                                 (is-anthropic "rawPredict")
-                                 ((and gptel-stream gptel-use-curl) "streamGenerateContent")
-                                 (t "generateContent"))))
+                        (publisher (gptel-vertex--detect-publisher model-name))
+                        (publisher-name (gptel-vertex--get-publisher-name publisher))
+                        (method (pcase publisher
+                                  ('anthropic
+                                   (if gptel-stream "streamRawPredict" "rawPredict"))
+                                  ('google
+                                   (if (and gptel-stream gptel-use-curl)
+                                       "streamGenerateContent"
+                                     "generateContent"))
+                                  (_ "generateContent"))))
                    (format "%s://%s/v1/projects/%s/locations/%s/publishers/%s/models/%s:%s"
-                           protocol host project-id location publisher model-name method))))))
+                           protocol host project-id location publisher-name model-name method))))))
 
     (prog1 backend
       ;; Register the backend
