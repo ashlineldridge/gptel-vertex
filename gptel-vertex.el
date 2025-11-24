@@ -667,9 +667,9 @@ BACKEND is the gptel-vertex backend (unused but kept for consistency).
 RESPONSE is the JSON response plist.
 INFO is the request info plist.  Mutate with metadata."
   ;; Store metadata
-  (when-let ((stop-reason (plist-get response :stop_reason)))
+  (when-let* ((stop-reason (plist-get response :stop_reason)))
     (plist-put info :stop-reason stop-reason))
-  (when-let ((usage (plist-get response :usage)))
+  (when-let* ((usage (plist-get response :usage)))
     (plist-put info :output-tokens (plist-get usage :output_tokens)))
 
   (cond
@@ -763,10 +763,7 @@ If INCLUDE-TEXT is non-nil, include response in prompts list."
 ;;; Prompt parsing methods
 
 (cl-defmethod gptel--parse-list ((backend gptel-vertex) prompt-list)
-  "Parse PROMPT-LIST for Vertex AI.
-
-Handles both simple (list of strings) and advanced (list of
-role-content pairs) formats.  Dispatches based on current model."
+  "Parse PROMPT-LIST and return list of prompts for `gptel-vertex' BACKEND."
   (let* ((model-name (gptel--model-name gptel-model))
          (publisher (gptel-vertex--detect-publisher model-name)))
     (pcase publisher
@@ -845,8 +842,8 @@ PROMPT-LIST is either simple (strings) or advanced (role-content pairs)."
 (cl-defmethod gptel--parse-buffer ((backend gptel-vertex) &optional max-entries)
   "Parse current buffer for conversation history.
 
-Optional MAX-ENTRIES limits the number of entries parsed.
-Dispatches based on current model."
+Optional MAX-ENTRIES limits the number of entries parsed and BACKEND specifies
+the `gptel-vertex' backend."
   (let* ((model-name (gptel--model-name gptel-model))
          (publisher (gptel-vertex--detect-publisher model-name)))
     (pcase publisher
