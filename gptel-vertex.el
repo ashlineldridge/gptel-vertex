@@ -98,9 +98,11 @@ Default refreshes 100 seconds before expiry to ensure reliability."
      :description "Best price/performance, with well-rounded capabilities"
      :capabilities (tool-use json media audio video)
      :mime-types ("image/png" "image/jpeg" "image/webp" "image/heic" "image/heif"
-                  "application/pdf" "text/plain" "text/csv" "text/html"
-                  "audio/mpeg" "audio/wav" "audio/ogg" "audio/flac" "audio/aac" "audio/mp3"
-                  "video/mp4" "video/mpeg" "video/avi" "video/quicktime" "video/webm")
+                  "application/pdf" "text/plain"
+                  "audio/x-aac" "audio/flac" "audio/mp3" "audio/m4a" "audio/mpeg"
+                  "audio/mpga" "audio/mp4" "audio/ogg" "audio/pcm" "audio/wav" "audio/webm"
+                  "video/x-flv" "video/quicktime" "video/mpeg" "video/mpegs" "video/mpg"
+                  "video/mp4" "video/webm" "video/wmv" "video/3gpp")
      :context-window 1048
      :input-cost 0.3
      :output-cost 2.50
@@ -109,12 +111,27 @@ Default refreshes 100 seconds before expiry to ensure reliability."
      :description "Most powerful Gemini thinking model"
      :capabilities (tool-use json media audio video)
      :mime-types ("image/png" "image/jpeg" "image/webp" "image/heic" "image/heif"
-                  "application/pdf" "text/plain" "text/csv" "text/html"
-                  "audio/mpeg" "audio/wav" "audio/ogg" "audio/flac" "audio/aac" "audio/mp3"
-                  "video/mp4" "video/mpeg" "video/avi" "video/quicktime" "video/webm")
+                  "application/pdf" "text/plain"
+                  "audio/x-aac" "audio/flac" "audio/mp3" "audio/m4a" "audio/mpeg"
+                  "audio/mpga" "audio/mp4" "audio/ogg" "audio/pcm" "audio/wav" "audio/webm"
+                  "video/x-flv" "video/quicktime" "video/mpeg" "video/mpegs" "video/mpg"
+                  "video/mp4" "video/webm" "video/wmv" "video/3gpp")
      :context-window 1048
      :input-cost 1.25
      :output-cost 10.00
+     :cutoff-date "2025-01")
+    (gemini-3-pro-preview
+     :description "Most intelligent Gemini model with SOTA reasoning and multimodal understanding"
+     :capabilities (tool-use json media audio video)
+     :mime-types ("image/png" "image/jpeg" "image/webp" "image/heic" "image/heif"
+                  "application/pdf" "text/plain"
+                  "audio/x-aac" "audio/flac" "audio/mp3" "audio/m4a" "audio/mpeg"
+                  "audio/mpga" "audio/mp4" "audio/ogg" "audio/pcm" "audio/wav" "audio/webm"
+                  "video/x-flv" "video/quicktime" "video/mpeg" "video/mpegs" "video/mpg"
+                  "video/mp4" "video/webm" "video/wmv" "video/3gpp")
+     :context-window 1000
+     :input-cost 2.0
+     :output-cost 12.00
      :cutoff-date "2025-01")
     (claude-sonnet-4-5@20250929
      :description "High-performance model with exceptional reasoning"
@@ -123,14 +140,14 @@ Default refreshes 100 seconds before expiry to ensure reliability."
      :context-window 200
      :input-cost 3
      :output-cost 15
-     :cutoff-date "2025-07")
-    (claude-opus-4-1@20250805
+     :cutoff-date "2025-01")
+    (claude-opus-4-5@20251101
      :description "Most capable model for complex reasoning"
      :capabilities (media tool-use)
      :mime-types ("image/jpeg" "image/png" "image/gif" "image/webp" "application/pdf")
      :context-window 200
-     :input-cost 15
-     :output-cost 75
+     :input-cost 5
+     :output-cost 25
      :cutoff-date "2025-03"))
   "Models available in Vertex AI.
 
@@ -307,8 +324,18 @@ PROMPTS is a list of message plists."
       (setq params (plist-put params :temperature (max gptel-temperature 1.0))))
     (when gptel-max-tokens
       (setq params (plist-put params :maxOutputTokens gptel-max-tokens)))
-    (when gptel-include-reasoning
-      (setq params (plist-put params :thinkingConfig '(:includeThoughts t))))
+    ;; Handle reasoning/thinking based on model
+    (let ((model-name (gptel--model-name gptel-model)))
+      (cond
+       ;; Gemini 3: Uses thinkingLevel in thinkingConfig (always enabled, can only control depth)
+       ((string-match-p "^gemini-3" model-name)
+        ;; Default is "HIGH", set to "LOW" if reasoning is disabled
+        (setq params (plist-put params :thinkingConfig
+                                `(:thinkingLevel ,(if gptel-include-reasoning "HIGH" "LOW")))))
+       ;; Gemini 2.5 Pro: Uses thinkingConfig with includeThoughts (can be enabled/disabled)
+       ((and gptel-include-reasoning
+             (string-match-p "gemini-2\\.5-pro" model-name))
+        (setq params (plist-put params :thinkingConfig '(:includeThoughts t))))))
     (when gptel--schema
       (setq params (nconc params (gptel-vertex--gemini-filter-schema
                                   (gptel--parse-schema gptel-backend gptel--schema)))))
@@ -1142,6 +1169,10 @@ Example:
                  (let* ((model-name (gptel--model-name gptel-model))
                         (publisher (gptel-vertex--detect-publisher model-name))
                         (publisher-name (gptel-vertex--get-publisher-name publisher))
+                        ;; gemini-3 models require global region
+                        (use-global (string-match-p "^gemini-3" model-name))
+                        (region (if use-global "global" location))
+                        (endpoint-host (if use-global "aiplatform.googleapis.com" host))
                         (method (pcase publisher
                                   ('anthropic
                                    (if gptel-stream "streamRawPredict" "rawPredict"))
@@ -1151,7 +1182,7 @@ Example:
                                      "generateContent"))
                                   (_ "generateContent"))))
                    (format "%s://%s/v1/projects/%s/locations/%s/publishers/%s/models/%s:%s"
-                           protocol host project-id location publisher-name model-name method))))))
+                           protocol endpoint-host project-id region publisher-name model-name method))))))
 
     (prog1 backend
       ;; Register the backend
